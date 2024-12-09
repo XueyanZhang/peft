@@ -83,6 +83,8 @@ from .tuners import (
     LNTuningModel,
     VBLoRAConfig,
     VBLoRAModel,
+    UoraConfig,
+    UoraModel,
     VeraConfig,
     VeraModel,
     FourierFTConfig,

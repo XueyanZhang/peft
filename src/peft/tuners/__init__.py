@@ -40,6 +40,7 @@ from .oft import OFTConfig, OFTModel
 from .mixed import MixedModel
 from .poly import PolyConfig, PolyModel
 from .ln_tuning import LNTuningConfig, LNTuningModel
+from .uora import UoraConfig, UoraModel
 from .vera import VeraConfig, VeraModel
 from .fourierft import FourierFTConfig, FourierFTModel
 from .xlora import XLoraConfig, XLoraModel

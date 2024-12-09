@@ -179,6 +179,18 @@ def get_peft_model_state_dict(
                 )
             to_return["base_model.vera_A." + adapter_name] = state_dict["base_model.vera_A." + adapter_name]
             to_return["base_model.vera_B." + adapter_name] = state_dict["base_model.vera_B." + adapter_name]
+    elif config.peft_type == PeftType.UORA:
+        to_return = {k: state_dict[k] for k in state_dict if "uora_" in k}
+        if config.save_projection:
+            # TODO: adding uora_A and uora_B to `self.get_base_layer` would
+            # make name to match here difficult to predict.
+            if f"base_model.uora_A.{adapter_name}" not in state_dict:
+                raise ValueError(
+                    "Model was initialised to not save uora_A and uora_B but config now specifies to save projection!"
+                    " Set `config.save_projection` to `False`."
+                )
+            to_return["base_model.uora_A." + adapter_name] = state_dict["base_model.uora_A." + adapter_name]
+            to_return["base_model.uora_B." + adapter_name] = state_dict["base_model.uora_B." + adapter_name]
     elif config.peft_type == PeftType.FOURIERFT:
         to_return = {k: state_dict[k] for k in state_dict if "fourierft_" in k}
     elif config.peft_type == PeftType.XLORA:
