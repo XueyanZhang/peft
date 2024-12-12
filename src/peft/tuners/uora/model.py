@@ -69,6 +69,81 @@ def _kaiming_init(
         return tensor.uniform_(-bound, bound, generator=generator)
 
 
+def _random_init(
+    tensor_or_shape: Union[torch.Tensor, tuple[int, ...]],
+    generator: torch.Generator,
+) -> torch.Tensor:
+    """
+    Random Uniform Initialisation adapted to accept a `torch.Generator` object for PRNG.
+
+    Args:
+        tensor_or_shape (`Union[torch.Tensor, tuple[int, ...]]`):
+            Tensor to initialise, or shape of new tensor to create and then initialise.
+        generator: (`torch.Generator`):
+            Generator object that manages the state of the PRNG algorithm in use.
+
+    Returns:
+        `torch.Tensor`: The initialised tensor.
+    """
+    if isinstance(tensor_or_shape, tuple):
+        tensor = torch.empty(tensor_or_shape)
+    else:
+        tensor = tensor_or_shape
+
+    with torch.no_grad():
+        return tensor.uniform_(-1, 1, generator=generator)
+
+
+def _xavier_init(
+    tensor_or_shape: Union[torch.Tensor, tuple[int, ...]],
+    generator: torch.Generator,
+) -> torch.Tensor:
+    """
+    Xavier Uniform Initialisation adapted to accept a `torch.Generator` object for PRNG.
+
+    Args:
+        tensor_or_shape (`Union[torch.Tensor, tuple[int, ...]]`):
+            Tensor to initialise, or shape of new tensor to create and then initialise.
+        generator: (`torch.Generator`):
+            Generator object that manages the state of the PRNG algorithm in use.
+
+    Returns:
+        `torch.Tensor`: The initialised tensor.
+    """
+    if isinstance(tensor_or_shape, tuple):
+        tensor = torch.empty(tensor_or_shape)
+    else:
+        tensor = tensor_or_shape
+
+    with torch.no_grad():
+        return nn.init.xavier_uniform_(tensor, generator=generator)
+
+
+def _orthogonal_init(
+    tensor_or_shape: Union[torch.Tensor, tuple[int, ...]],
+    generator: torch.Generator,
+) -> torch.Tensor:
+    """
+    Orthogonal Initialisation adapted to accept a `torch.Generator` object for PRNG.
+
+    Args:
+        tensor_or_shape (`Union[torch.Tensor, tuple[int, ...]]`):
+            Tensor to initialise, or shape of new tensor to create and then initialise.
+        generator: (`torch.Generator`):
+            Generator object that manages the state of the PRNG algorithm in use.
+
+    Returns:
+        `torch.Tensor`: The initialised tensor.
+    """
+    if isinstance(tensor_or_shape, tuple):
+        tensor = torch.empty(tensor_or_shape)
+    else:
+        tensor = tensor_or_shape
+
+    with torch.no_grad():
+        return nn.init.orthogonal_(tensor, generator=generator)
+
+
 class UoraModel(BaseTuner):
     """
     Creates Vector-based Random Matrix Adaptation (Uora) model from a pretrained transformers model.
@@ -150,6 +225,13 @@ class UoraModel(BaseTuner):
 
         # deterministic init of uora_A and uora_B if we know the key
         generator = torch.Generator(device="cpu").manual_seed(config.projection_prng_key)
+        # tryout different initialisation methods
+        # uora_A = _orthogonal_init((config.r, linear_in_dim), generator=generator)
+        # uora_B = _orthogonal_init((linear_out_dim, config.r), generator=generator)
+        # uora_A = _xavier_init((config.r, linear_in_dim), generator=generator)
+        # uora_B = _xavier_init((linear_out_dim, config.r), generator=generator)
+        # uora_A = _random_init((config.r, linear_in_dim), generator=generator)
+        # uora_B = _random_init((linear_out_dim, config.r), generator=generator)
         uora_A = _kaiming_init((config.r, linear_in_dim), generator=generator)
         uora_B = _kaiming_init((linear_out_dim, config.r), generator=generator)
 
@@ -160,15 +242,7 @@ class UoraModel(BaseTuner):
         self._init_uora_A_uora_B(config, adapter_name)
 
     def _check_new_adapter_config(self, config: UoraConfig) -> None:
-        """
-        A helper method to check the config when a new adapter is being added.
 
-        Raise a ValueError if there is something wrong with the config or if it conflicts with existing adapters.
-
-        """
-        # the below todo is copied from LoRA
-        # TODO: there should be a check if any of the existing adapters actually has bias != "none", or else the check
-        # does not fully correspond to the error message.
         if (len(self.peft_config) > 1) and (config.bias != "none"):
             raise ValueError(
                 f"{self.__class__.__name__} supports only 1 adapter with bias. When using multiple adapters, "
@@ -205,7 +279,7 @@ class UoraModel(BaseTuner):
         target_name,
         parent,
         current_key,
-        **optional_kwargs,
+        # **optional_kwargs,
     ):
         if current_key is None:
             raise ValueError("Current Key shouldn't be `None`")
@@ -217,8 +291,8 @@ class UoraModel(BaseTuner):
             "uora_dropout": uora_config.uora_dropout,
             "fan_in_fan_out": uora_config.fan_in_fan_out,
             "init_weights": uora_config.init_weights,
-            "loaded_in_8bit": getattr(self.model, "is_loaded_in_8bit", False),
-            "loaded_in_4bit": getattr(self.model, "is_loaded_in_4bit", False),
+            # "loaded_in_8bit": getattr(self.model, "is_loaded_in_8bit", False),
+            # "loaded_in_4bit": getattr(self.model, "is_loaded_in_4bit", False),
         }
         kwargs["bias"] = bias
 
@@ -292,45 +366,45 @@ class UoraModel(BaseTuner):
     @staticmethod
     def _create_new_module(uora_config, uora_A, uora_B, adapter_name, target, **kwargs):
         # avoid eager bnb import
-        if is_bnb_available():
-            import bitsandbytes as bnb
+        # if is_bnb_available():
+        #     import bitsandbytes as bnb
 
-            from .bnb import Linear8bitLt
+        #     from .bnb import Linear8bitLt
 
-        if is_bnb_4bit_available():
-            from .bnb import Linear4bit
+        # if is_bnb_4bit_available():
+        #     from .bnb import Linear4bit
 
         bias = kwargs.pop("bias", False)
-        loaded_in_8bit = kwargs.get("loaded_in_8bit", False)
-        loaded_in_4bit = kwargs.get("loaded_in_4bit", False)
+        # loaded_in_8bit = kwargs.get("loaded_in_8bit", False)
+        # loaded_in_4bit = kwargs.get("loaded_in_4bit", False)
 
         if isinstance(target, BaseTunerLayer):
             target_base_layer = target.get_base_layer()
         else:
             target_base_layer = target
 
-        if loaded_in_8bit and isinstance(target_base_layer, bnb.nn.Linear8bitLt):
-            eightbit_kwargs = kwargs.copy()
-            eightbit_kwargs.update(
-                {
-                    "has_fp16_weights": target_base_layer.state.has_fp16_weights,
-                    "memory_efficient_backward": target_base_layer.state.memory_efficient_backward,
-                    "threshold": target_base_layer.state.threshold,
-                    "index": target_base_layer.index,
-                }
-            )
-            return Linear8bitLt(target, adapter_name, uora_A, uora_B, **eightbit_kwargs)
-        elif loaded_in_4bit and isinstance(target_base_layer, bnb.nn.Linear4bit):
-            fourbit_kwargs = kwargs.copy()
-            fourbit_kwargs.update(
-                {
-                    "compute_dtype": target_base_layer.compute_dtype,
-                    "compress_statistics": target_base_layer.weight.compress_statistics,
-                    "quant_type": target_base_layer.weight.quant_type,
-                }
-            )
-            return Linear4bit(target, adapter_name, uora_A, uora_B, **fourbit_kwargs)
-        elif isinstance(target_base_layer, torch.nn.Linear):
+        # if loaded_in_8bit and isinstance(target_base_layer, bnb.nn.Linear8bitLt):
+        #     eightbit_kwargs = kwargs.copy()
+        #     eightbit_kwargs.update(
+        #         {
+        #             "has_fp16_weights": target_base_layer.state.has_fp16_weights,
+        #             "memory_efficient_backward": target_base_layer.state.memory_efficient_backward,
+        #             "threshold": target_base_layer.state.threshold,
+        #             "index": target_base_layer.index,
+        #         }
+        #     )
+        #     return Linear8bitLt(target, adapter_name, uora_A, uora_B, **eightbit_kwargs)
+        # elif loaded_in_4bit and isinstance(target_base_layer, bnb.nn.Linear4bit):
+        #     fourbit_kwargs = kwargs.copy()
+        #     fourbit_kwargs.update(
+        #         {
+        #             "compute_dtype": target_base_layer.compute_dtype,
+        #             "compress_statistics": target_base_layer.weight.compress_statistics,
+        #             "quant_type": target_base_layer.weight.quant_type,
+        #         }
+        #     )
+        #     return Linear4bit(target, adapter_name, uora_A, uora_B, **fourbit_kwargs)
+        if isinstance(target_base_layer, torch.nn.Linear):
             if kwargs["fan_in_fan_out"]:
                 warnings.warn(
                     "fan_in_fan_out is set to True but the target module is `torch.nn.Linear`. "
