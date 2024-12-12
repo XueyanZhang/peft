@@ -14,7 +14,7 @@
 
 from __future__ import annotations
 
-import math
+# import math
 import warnings
 from dataclasses import asdict
 from enum import Enum
@@ -22,11 +22,11 @@ from typing import Optional, Union
 
 import torch
 import torch.nn as nn
-from torch.nn.init import _calculate_correct_fan
+# from torch.nn.init import _calculate_correct_fan
 from tqdm import tqdm
 from transformers.pytorch_utils import Conv1D
 
-from peft.import_utils import is_bnb_4bit_available, is_bnb_available
+# from peft.import_utils import is_bnb_4bit_available, is_bnb_available
 from peft.tuners.tuners_utils import BaseTuner, BaseTunerLayer, check_target_module_exists
 from peft.utils import (
     TRANSFORMERS_MODELS_TO_UORA_TARGET_MODULES_MAPPING,
@@ -38,110 +38,7 @@ from .._buffer_dict import BufferDict
 from ..tuners_utils import _maybe_include_all_linear_layers
 from .config import UoraConfig
 from .layer import Linear, UoraLayer
-
-
-def _kaiming_init(
-    tensor_or_shape: Union[torch.Tensor, tuple[int, ...]],
-    generator: torch.Generator,
-) -> torch.Tensor:
-    """
-    Kaiming Uniform Initialisation adapted to accept a `torch.Generator` object for PRNG.
-
-    Args:
-        tensor_or_shape (`Union[torch.Tensor, tuple[int, ...]]`):
-            Tensor to initialise, or shape of new tensor to create and then initialise.
-        generator: (`torch.Generator`):
-            Generator object that manages the state of the PRNG algorithm in use.
-
-    Returns:
-        `torch.Tensor`: The initialised tensor.
-    """
-    if isinstance(tensor_or_shape, tuple):
-        tensor = torch.empty(tensor_or_shape)
-    else:
-        tensor = tensor_or_shape
-    fan = _calculate_correct_fan(tensor, "fan_in")
-    gain = math.sqrt(2)
-    std = gain / math.sqrt(fan)
-    bound = math.sqrt(3.0) * std
-
-    with torch.no_grad():
-        return tensor.uniform_(-bound, bound, generator=generator)
-
-
-def _random_init(
-    tensor_or_shape: Union[torch.Tensor, tuple[int, ...]],
-    generator: torch.Generator,
-) -> torch.Tensor:
-    """
-    Random Uniform Initialisation adapted to accept a `torch.Generator` object for PRNG.
-
-    Args:
-        tensor_or_shape (`Union[torch.Tensor, tuple[int, ...]]`):
-            Tensor to initialise, or shape of new tensor to create and then initialise.
-        generator: (`torch.Generator`):
-            Generator object that manages the state of the PRNG algorithm in use.
-
-    Returns:
-        `torch.Tensor`: The initialised tensor.
-    """
-    if isinstance(tensor_or_shape, tuple):
-        tensor = torch.empty(tensor_or_shape)
-    else:
-        tensor = tensor_or_shape
-
-    with torch.no_grad():
-        return tensor.uniform_(-1, 1, generator=generator)
-
-
-def _xavier_init(
-    tensor_or_shape: Union[torch.Tensor, tuple[int, ...]],
-    generator: torch.Generator,
-) -> torch.Tensor:
-    """
-    Xavier Uniform Initialisation adapted to accept a `torch.Generator` object for PRNG.
-
-    Args:
-        tensor_or_shape (`Union[torch.Tensor, tuple[int, ...]]`):
-            Tensor to initialise, or shape of new tensor to create and then initialise.
-        generator: (`torch.Generator`):
-            Generator object that manages the state of the PRNG algorithm in use.
-
-    Returns:
-        `torch.Tensor`: The initialised tensor.
-    """
-    if isinstance(tensor_or_shape, tuple):
-        tensor = torch.empty(tensor_or_shape)
-    else:
-        tensor = tensor_or_shape
-
-    with torch.no_grad():
-        return nn.init.xavier_uniform_(tensor, generator=generator)
-
-
-def _orthogonal_init(
-    tensor_or_shape: Union[torch.Tensor, tuple[int, ...]],
-    generator: torch.Generator,
-) -> torch.Tensor:
-    """
-    Orthogonal Initialisation adapted to accept a `torch.Generator` object for PRNG.
-
-    Args:
-        tensor_or_shape (`Union[torch.Tensor, tuple[int, ...]]`):
-            Tensor to initialise, or shape of new tensor to create and then initialise.
-        generator: (`torch.Generator`):
-            Generator object that manages the state of the PRNG algorithm in use.
-
-    Returns:
-        `torch.Tensor`: The initialised tensor.
-    """
-    if isinstance(tensor_or_shape, tuple):
-        tensor = torch.empty(tensor_or_shape)
-    else:
-        tensor = tensor_or_shape
-
-    with torch.no_grad():
-        return nn.init.orthogonal_(tensor, generator=generator)
+from .init_utils import _kaiming_init, _random_init, _xavier_init, _orthogonal_init
 
 
 class UoraModel(BaseTuner):
@@ -225,15 +122,21 @@ class UoraModel(BaseTuner):
 
         # deterministic init of uora_A and uora_B if we know the key
         generator = torch.Generator(device="cpu").manual_seed(config.projection_prng_key)
-        # tryout different initialisation methods
-        # uora_A = _orthogonal_init((config.r, linear_in_dim), generator=generator)
-        # uora_B = _orthogonal_init((linear_out_dim, config.r), generator=generator)
-        # uora_A = _xavier_init((config.r, linear_in_dim), generator=generator)
-        # uora_B = _xavier_init((linear_out_dim, config.r), generator=generator)
-        # uora_A = _random_init((config.r, linear_in_dim), generator=generator)
-        # uora_B = _random_init((linear_out_dim, config.r), generator=generator)
-        uora_A = _kaiming_init((config.r, linear_in_dim), generator=generator)
-        uora_B = _kaiming_init((linear_out_dim, config.r), generator=generator)
+
+        if config.initialization_method == "kaiming":
+            uora_A = _kaiming_init((config.r, linear_in_dim), generator=generator)
+            uora_B = _kaiming_init((linear_out_dim, config.r), generator=generator)
+        elif config.initialization_method == "xavier":
+            uora_A = _xavier_init((config.r, linear_in_dim), generator=generator)
+            uora_B = _xavier_init((linear_out_dim, config.r), generator=generator)
+        elif config.initialization_method == "orthogonal":
+            uora_A = _orthogonal_init((config.r, linear_in_dim), generator=generator)
+            uora_B = _orthogonal_init((linear_out_dim, config.r), generator=generator)
+        elif config.initialization_method == "random":
+            uora_A = _random_init((config.r, linear_in_dim), generator=generator)
+            uora_B = _random_init((linear_out_dim, config.r), generator=generator)
+        else:
+            raise ValueError(f"Unknown initialization method: {config.initialization_method}")
 
         self.uora_A[adapter_name] = uora_A
         self.uora_B[adapter_name] = uora_B
@@ -305,6 +208,8 @@ class UoraModel(BaseTuner):
                 uora_config.uora_dropout,
                 uora_config.init_weights,
                 d_initial=uora_config.d_initial,
+                initialization_method=uora_config.initialization_method,
+                projection_prng_key=uora_config.projection_prng_key,
             )
         else:
             new_module = self._create_new_module(uora_config, self.uora_A, self.uora_B, adapter_name, target, **kwargs)
@@ -431,6 +336,8 @@ class UoraModel(BaseTuner):
             adapter_name,
             bias=bias,
             d_initial=uora_config.d_initial,
+            initialization_method=uora_config.initialization_method,
+            projection_prng_key=uora_config.projection_prng_key,
             **kwargs,
         )
 

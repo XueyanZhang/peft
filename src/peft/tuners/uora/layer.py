@@ -25,6 +25,8 @@ from peft.utils.other import transpose
 
 from .._buffer_dict import BufferDict
 
+from .init_utils import _kaiming_init, _random_init, _xavier_init, _orthogonal_init
+
 
 class UoraLayer(BaseTunerLayer):
     # List all names of layers that may contain adapter weights
@@ -45,6 +47,8 @@ class UoraLayer(BaseTunerLayer):
         self.uora_A: Optional[BufferDict] = None
         self.uora_B: Optional[BufferDict] = None
 
+        self._update_counter = 0  # Made private with underscore prefix
+
         # Mark the weight as unmerged
         self._disable_adapters = False
         self.merged_adapters = []
@@ -54,12 +58,15 @@ class UoraLayer(BaseTunerLayer):
             in_features, out_features = base_layer.in_features, base_layer.out_features
         elif isinstance(base_layer, Conv1D):
             in_features, out_features = (
-                base_layer.weight.ds_shape if hasattr(base_layer.weight, "ds_shape") else base_layer.weight.shape
+            base_layer.weight.ds_shape if hasattr(base_layer.weight, "ds_shape") else base_layer.weight.shape
             )
 
         self.in_features = in_features
         self.out_features = out_features
         self.kwargs = kwargs
+
+    def increment_update_counter(self):
+        self._update_counter += 1
 
     @property
     def merged(self) -> bool:
@@ -74,6 +81,9 @@ class UoraLayer(BaseTunerLayer):
         uora_dropout,
         init_weights,
         d_initial: float = 0.1,
+        initialization_method: str = "kaiming",
+        projection_prng_key: int = 0,
+        update_threshold: int = 512,
     ):
         if r <= 0:
             raise ValueError(f"`r` should be a positive integer value but the value passed is {r}")
@@ -87,6 +97,11 @@ class UoraLayer(BaseTunerLayer):
         # Actual trainable parameters
         self.uora_lambda_b[adapter_name] = nn.Parameter(torch.ones(self.out_features), requires_grad=True)
         self.uora_lambda_d[adapter_name] = nn.Parameter(torch.randn(r), requires_grad=True)
+
+        # Store the UORA parameters
+        self.initialization_method = initialization_method
+        self.projection_prng_key = projection_prng_key
+        self.update_threshold = update_threshold
 
         # non trainable references to uora_A/B buffers
         self.uora_A = uora_A
@@ -137,6 +152,24 @@ class UoraLayer(BaseTunerLayer):
                 nn.init.zeros_(self.uora_lambda_d[adapter_name]).fill_(d_initial)
                 nn.init.zeros_(self.uora_lambda_b[adapter_name])
 
+    def update_frozen_AB(self):
+        generator = torch.Generator(device="cpu").manual_seed(self.projection_prng_key)
+        for adapter_name in self.uora_A.keys():
+            if self.initialization_method == "kaiming":
+                self.uora_A[adapter_name].data = _kaiming_init(self.uora_A[adapter_name].shape, generator=generator)
+                self.uora_B[adapter_name].data = _kaiming_init(self.uora_B[adapter_name].shape, generator=generator)
+            elif self.initialization_method == "xavier":
+                self.uora_A[adapter_name].data = _xavier_init(self.uora_A[adapter_name].shape, generator=generator)
+                self.uora_B[adapter_name].data = _xavier_init(self.uora_B[adapter_name].shape, generator=generator)
+            elif self.initialization_method == "orthogonal":
+                self.uora_A[adapter_name].data = _orthogonal_init(self.uora_A[adapter_name].shape, generator=generator)
+                self.uora_B[adapter_name].data = _orthogonal_init(self.uora_B[adapter_name].shape, generator=generator)
+            elif self.initialization_method == "random":
+                self.uora_A[adapter_name].data = _random_init(self.uora_A[adapter_name].shape, generator=generator)
+                self.uora_B[adapter_name].data = _random_init(self.uora_B[adapter_name].shape, generator=generator)
+            else:
+                raise ValueError(f"Unknown initialization method: {self.initialization_method}")
+
 
 class Linear(nn.Linear, UoraLayer):
     # Uora implemented in a dense layer
@@ -152,6 +185,8 @@ class Linear(nn.Linear, UoraLayer):
         is_target_conv_1d_layer: bool = False,
         init_weights: bool = True,
         d_initial: float = 0.1,
+        initialization_method: str = "kaiming",
+        projection_prng_key: int = 0,
         **kwargs,
     ) -> None:
         # this gets the init from nn.Linear's super perspective, i.e. nn.Module.__init__, which should always be called
@@ -160,7 +195,7 @@ class Linear(nn.Linear, UoraLayer):
         self.fan_in_fan_out = fan_in_fan_out
 
         self._active_adapter = adapter_name
-        self.update_layer(adapter_name, uora_A, uora_B, r, uora_dropout, init_weights, d_initial=d_initial)
+        self.update_layer(adapter_name, uora_A, uora_B, r, uora_dropout, init_weights, d_initial=d_initial, initialization_method=initialization_method, projection_prng_key=projection_prng_key)
         self.is_target_conv_1d_layer = is_target_conv_1d_layer
 
     def merge(self, safe_merge: bool = False, adapter_names: Optional[List[str]] = None) -> None:
@@ -285,6 +320,11 @@ class Linear(nn.Linear, UoraLayer):
                 dropout = self.uora_dropout[active_adapter]
                 x = x.to(lambda_d.dtype)
                 result = result + lambda_b * F.linear(lambda_d * F.linear(dropout(x), sliced_A), sliced_B)
+
+        self.increment_update_counter()
+        if self._update_counter >= self.update_threshold:
+            self.update_frozen_AB()
+            self._update_counter = 0
 
         result = result.to(previous_dtype)
         return result

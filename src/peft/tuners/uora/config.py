@@ -70,6 +70,9 @@ class UoraConfig(PeftConfig):
     layers_pattern: Optional[Union[list[str], str]] = field(
         default=None, metadata={"help": "Pattern"}
     )
+    initialization_method: str = field(
+        default="kaiming", metadata={"help": "Initialization method", "choices": ["kaiming", "xavier", "orthogonal", "random"]}
+    )
 
     def __post_init__(self):
         super().__post_init__()
