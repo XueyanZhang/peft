@@ -83,7 +83,7 @@ class UoraLayer(BaseTunerLayer):
         d_initial: float = 0.1,
         initialization_method: str = "kaiming",
         projection_prng_key: int = 0,
-        update_threshold: int = 512,
+        reinit_threshold: int = 512,
     ):
         if r <= 0:
             raise ValueError(f"`r` should be a positive integer value but the value passed is {r}")
@@ -101,7 +101,7 @@ class UoraLayer(BaseTunerLayer):
         # Store the UORA parameters
         self.initialization_method = initialization_method
         self.projection_prng_key = projection_prng_key
-        self.update_threshold = update_threshold
+        self.reinit_threshold = reinit_threshold
 
         # non trainable references to uora_A/B buffers
         self.uora_A = uora_A
@@ -153,22 +153,28 @@ class UoraLayer(BaseTunerLayer):
                 nn.init.zeros_(self.uora_lambda_b[adapter_name])
 
     def update_frozen_AB(self):
+        # generator = torch.Generator(device="cpu").manual_seed(self.projection_prng_key)
+        self.projection_prng_key = torch.randint(0, 1000000, (1,)).item()
         generator = torch.Generator(device="cpu").manual_seed(self.projection_prng_key)
+        print("\033[94mXYZ::Updating frozen AB with method:", self.initialization_method, "\033[0m")
         for adapter_name in self.uora_A.keys():
             if self.initialization_method == "kaiming":
-                self.uora_A[adapter_name].data = _kaiming_init(self.uora_A[adapter_name].shape, generator=generator)
-                self.uora_B[adapter_name].data = _kaiming_init(self.uora_B[adapter_name].shape, generator=generator)
+                updated_uora_A = _kaiming_init(self.uora_A[adapter_name].shape, generator=generator)
+                updated_uora_B = _kaiming_init(self.uora_B[adapter_name].shape, generator=generator)
             elif self.initialization_method == "xavier":
-                self.uora_A[adapter_name].data = _xavier_init(self.uora_A[adapter_name].shape, generator=generator)
-                self.uora_B[adapter_name].data = _xavier_init(self.uora_B[adapter_name].shape, generator=generator)
+                updated_uora_A = _xavier_init(self.uora_A[adapter_name].shape, generator=generator)
+                updated_uora_B = _xavier_init(self.uora_B[adapter_name].shape, generator=generator)
             elif self.initialization_method == "orthogonal":
-                self.uora_A[adapter_name].data = _orthogonal_init(self.uora_A[adapter_name].shape, generator=generator)
-                self.uora_B[adapter_name].data = _orthogonal_init(self.uora_B[adapter_name].shape, generator=generator)
+                updated_uora_A = _orthogonal_init(self.uora_A[adapter_name].shape, generator=generator)
+                updated_uora_B = _orthogonal_init(self.uora_B[adapter_name].shape, generator=generator)
             elif self.initialization_method == "random":
-                self.uora_A[adapter_name].data = _random_init(self.uora_A[adapter_name].shape, generator=generator)
-                self.uora_B[adapter_name].data = _random_init(self.uora_B[adapter_name].shape, generator=generator)
+                updated_uora_A = _random_init(self.uora_A[adapter_name].shape, generator=generator)
+                updated_uora_B = _random_init(self.uora_B[adapter_name].shape, generator=generator)
             else:
                 raise ValueError(f"Unknown initialization method: {self.initialization_method}")
+            print("\033[93mXYZ: updated_uora_A:\033[0m", updated_uora_A)
+            self.uora_A[adapter_name].data = updated_uora_A
+            self.uora_B[adapter_name].data = updated_uora_B
 
 
 class Linear(nn.Linear, UoraLayer):
@@ -187,6 +193,7 @@ class Linear(nn.Linear, UoraLayer):
         d_initial: float = 0.1,
         initialization_method: str = "kaiming",
         projection_prng_key: int = 0,
+        reinit_threshold: int = 512,
         **kwargs,
     ) -> None:
         # this gets the init from nn.Linear's super perspective, i.e. nn.Module.__init__, which should always be called
@@ -195,8 +202,10 @@ class Linear(nn.Linear, UoraLayer):
         self.fan_in_fan_out = fan_in_fan_out
 
         self._active_adapter = adapter_name
-        self.update_layer(adapter_name, uora_A, uora_B, r, uora_dropout, init_weights, d_initial=d_initial, initialization_method=initialization_method, projection_prng_key=projection_prng_key)
+        self.update_layer(adapter_name, uora_A, uora_B, r, uora_dropout, init_weights, d_initial=d_initial, initialization_method=initialization_method, projection_prng_key=projection_prng_key, reinit_threshold=reinit_threshold)
         self.is_target_conv_1d_layer = is_target_conv_1d_layer
+
+        print(f"\033[95mXYZ::Linear Layer:initialization_method:{initialization_method} - projection_prng_key:{projection_prng_key} - reinit_threshold:{reinit_threshold}\033[0m")
 
     def merge(self, safe_merge: bool = False, adapter_names: Optional[List[str]] = None) -> None:
         """
@@ -322,7 +331,7 @@ class Linear(nn.Linear, UoraLayer):
                 result = result + lambda_b * F.linear(lambda_d * F.linear(dropout(x), sliced_A), sliced_B)
 
         self.increment_update_counter()
-        if self._update_counter >= self.update_threshold:
+        if self.reinit_threshold > 0 and self._update_counter >= self.reinit_threshold:
             self.update_frozen_AB()
             self._update_counter = 0
 

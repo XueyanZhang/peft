@@ -73,6 +73,9 @@ class UoraConfig(PeftConfig):
     initialization_method: str = field(
         default="kaiming", metadata={"help": "Initialization method", "choices": ["kaiming", "xavier", "orthogonal", "random"]}
     )
+    reinit_threshold: int = field(
+        default=512, metadata={"help": "Reinit"}
+    )
 
     def __post_init__(self):
         super().__post_init__()

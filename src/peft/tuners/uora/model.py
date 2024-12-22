@@ -143,6 +143,7 @@ class UoraModel(BaseTuner):
 
     def _pre_injection_hook(self, model: nn.Module, config: UoraConfig, adapter_name: str) -> None:
         self._init_uora_A_uora_B(config, adapter_name)
+        print(f"\033[92m{config}\033[0m")
 
     def _check_new_adapter_config(self, config: UoraConfig) -> None:
 
@@ -182,7 +183,7 @@ class UoraModel(BaseTuner):
         target_name,
         parent,
         current_key,
-        # **optional_kwargs,
+        **optional_kwargs,
     ):
         if current_key is None:
             raise ValueError("Current Key shouldn't be `None`")
@@ -210,6 +211,7 @@ class UoraModel(BaseTuner):
                 d_initial=uora_config.d_initial,
                 initialization_method=uora_config.initialization_method,
                 projection_prng_key=uora_config.projection_prng_key,
+                reinit_threshold=uora_config.reinit_threshold,
             )
         else:
             new_module = self._create_new_module(uora_config, self.uora_A, self.uora_B, adapter_name, target, **kwargs)
@@ -338,6 +340,7 @@ class UoraModel(BaseTuner):
             d_initial=uora_config.d_initial,
             initialization_method=uora_config.initialization_method,
             projection_prng_key=uora_config.projection_prng_key,
+            reinit_threshold=uora_config.reinit_threshold,
             **kwargs,
         )
 
