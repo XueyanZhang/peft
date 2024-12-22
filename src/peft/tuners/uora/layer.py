@@ -160,21 +160,21 @@ class UoraLayer(BaseTunerLayer):
         for adapter_name in self.uora_A.keys():
             if self.initialization_method == "kaiming":
                 updated_uora_A = _kaiming_init(self.uora_A[adapter_name].shape, generator=generator)
-                updated_uora_B = _kaiming_init(self.uora_B[adapter_name].shape, generator=generator)
+                # updated_uora_B = _kaiming_init(self.uora_B[adapter_name].shape, generator=generator)
             elif self.initialization_method == "xavier":
                 updated_uora_A = _xavier_init(self.uora_A[adapter_name].shape, generator=generator)
-                updated_uora_B = _xavier_init(self.uora_B[adapter_name].shape, generator=generator)
+                # updated_uora_B = _xavier_init(self.uora_B[adapter_name].shape, generator=generator)
             elif self.initialization_method == "orthogonal":
                 updated_uora_A = _orthogonal_init(self.uora_A[adapter_name].shape, generator=generator)
-                updated_uora_B = _orthogonal_init(self.uora_B[adapter_name].shape, generator=generator)
+                # updated_uora_B = _orthogonal_init(self.uora_B[adapter_name].shape, generator=generator)
             elif self.initialization_method == "random":
                 updated_uora_A = _random_init(self.uora_A[adapter_name].shape, generator=generator)
-                updated_uora_B = _random_init(self.uora_B[adapter_name].shape, generator=generator)
+                # updated_uora_B = _random_init(self.uora_B[adapter_name].shape, generator=generator)
             else:
                 raise ValueError(f"Unknown initialization method: {self.initialization_method}")
             print("\033[93mXYZ: updated_uora_A:\033[0m", updated_uora_A)
             self.uora_A[adapter_name].data = updated_uora_A
-            self.uora_B[adapter_name].data = updated_uora_B
+            # self.uora_B[adapter_name].data = updated_uora_B
 
 
 class Linear(nn.Linear, UoraLayer):
