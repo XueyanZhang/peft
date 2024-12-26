@@ -74,7 +74,10 @@ class UoraConfig(PeftConfig):
         default="kaiming", metadata={"help": "Initialization method", "choices": ["kaiming", "xavier", "orthogonal", "random"]}
     )
     reinit_threshold: int = field(
-        default=512, metadata={"help": "Reinit"}
+        default=0, metadata={"help": "Reinit. 0 means no update"}
+    )
+    below_threshold_max_count: int = field(
+        default=0, metadata={"help": "Below. 0 means no update"}
     )
 
     def __post_init__(self):

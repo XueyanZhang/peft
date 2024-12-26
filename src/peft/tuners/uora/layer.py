@@ -47,6 +47,10 @@ class UoraLayer(BaseTunerLayer):
         self.uora_A: Optional[BufferDict] = None
         self.uora_B: Optional[BufferDict] = None
 
+        # Stores the initialization method for the UORA parameters
+        self.lambda_d_below_threshold_counter = None
+        self.below_threshold_max_count = 0
+
         self._update_counter = 0  # Made private with underscore prefix
 
         # Mark the weight as unmerged
@@ -83,7 +87,8 @@ class UoraLayer(BaseTunerLayer):
         d_initial: float = 0.1,
         initialization_method: str = "kaiming",
         projection_prng_key: int = 0,
-        reinit_threshold: int = 512,
+        reinit_threshold: int = 0,
+        below_threshold_max_count: int = 0,
     ):
         if r <= 0:
             raise ValueError(f"`r` should be a positive integer value but the value passed is {r}")
@@ -102,6 +107,12 @@ class UoraLayer(BaseTunerLayer):
         self.initialization_method = initialization_method
         self.projection_prng_key = projection_prng_key
         self.reinit_threshold = reinit_threshold
+
+        # below threshold counter
+        self.lambda_d_below_threshold_counter = [0] * r
+        self.lambda_b_below_threshold_counter = [0] * self.out_features
+        self.below_threshold_max_count = below_threshold_max_count
+        print(f"\033[96mbelow_threshold_max_count: {below_threshold_max_count}\033[0m")
 
         # non trainable references to uora_A/B buffers
         self.uora_A = uora_A
@@ -153,28 +164,60 @@ class UoraLayer(BaseTunerLayer):
                 nn.init.zeros_(self.uora_lambda_b[adapter_name])
 
     def update_frozen_AB(self):
-        # generator = torch.Generator(device="cpu").manual_seed(self.projection_prng_key)
+        # Update random seed
         self.projection_prng_key = torch.randint(0, 1000000, (1,)).item()
-        generator = torch.Generator(device="cpu").manual_seed(self.projection_prng_key)
-        print("\033[94mXYZ::Updating frozen AB with method:", self.initialization_method, "\033[0m")
+        generator = torch.Generator().manual_seed(self.projection_prng_key)
+
+        # Map initialization methods to their functions
+        init_methods = {
+            "kaiming": _kaiming_init,
+            "xavier": _xavier_init,
+            "orthogonal": _orthogonal_init,
+            "random": _random_init
+        }
+
+        # Get initialization function
+        init_func = init_methods.get(self.initialization_method)
+        if init_func is None:
+            raise ValueError(f"Unknown initialization method: {self.initialization_method}")
+
+        print(f"\033[94mXYZ::Updating frozen AB with method: {self.initialization_method}\033[0m")
+
+        # Update matrices for each adapter
         for adapter_name in self.uora_A.keys():
-            if self.initialization_method == "kaiming":
-                # updated_uora_A = _kaiming_init(self.uora_A[adapter_name].shape, generator=generator)
-                updated_uora_B = _kaiming_init(self.uora_B[adapter_name].shape, generator=generator)
-            elif self.initialization_method == "xavier":
-                # updated_uora_A = _xavier_init(self.uora_A[adapter_name].shape, generator=generator)
-                updated_uora_B = _xavier_init(self.uora_B[adapter_name].shape, generator=generator)
-            elif self.initialization_method == "orthogonal":
-                # updated_uora_A = _orthogonal_init(self.uora_A[adapter_name].shape, generator=generator)
-                updated_uora_B = _orthogonal_init(self.uora_B[adapter_name].shape, generator=generator)
-            elif self.initialization_method == "random":
-                # updated_uora_A = _random_init(self.uora_A[adapter_name].shape, generator=generator)
-                updated_uora_B = _random_init(self.uora_B[adapter_name].shape, generator=generator)
-            else:
-                raise ValueError(f"Unknown initialization method: {self.initialization_method}")
-            # print("\033[93mXYZ: updated_uora_A:\033[0m", updated_uora_A)
-            # self.uora_A[adapter_name].data = updated_uora_A
+            # Initialize new matrices
+            updated_uora_A = init_func(self.uora_A[adapter_name].shape, generator=generator)
+            updated_uora_B = init_func(self.uora_B[adapter_name].shape, generator=generator)
+
+            # Update data
+            self.uora_A[adapter_name].data = updated_uora_A
             self.uora_B[adapter_name].data = updated_uora_B
+
+    def reinit_uora_matrix(self, matrix: torch.Tensor) -> torch.Tensor:
+        init_methods = {
+            "kaiming": _kaiming_init,
+            "xavier": _xavier_init,
+            "orthogonal": _orthogonal_init,
+            "random": _random_init
+        }
+
+        init_func = init_methods.get(self.initialization_method)
+        if init_func is None:
+            raise ValueError(f"Unknown initialization method: {self.initialization_method}")
+
+        return init_func(matrix.shape)
+
+    def reinit_uora_matrix_at_index(self, matrix: torch.Tensor, active_adapter:str, idx: int, row: bool = True) -> torch.Tensor:
+        print(f"\033[93mmatrix shape {matrix.shape}\033[0m")
+        base_matrix = matrix.clone()
+        reinit_matrix = self.reinit_uora_matrix(matrix)
+        if row:
+            base_matrix[idx, :] = reinit_matrix[idx, :]
+            assert (len(base_matrix) == self.r[active_adapter])
+        else:
+            base_matrix[:, idx] = reinit_matrix[:, idx]
+            assert (len(base_matrix[0]) == self.r[active_adapter])
+        return base_matrix
 
 
 class Linear(nn.Linear, UoraLayer):
@@ -191,9 +234,6 @@ class Linear(nn.Linear, UoraLayer):
         is_target_conv_1d_layer: bool = False,
         init_weights: bool = True,
         d_initial: float = 0.1,
-        initialization_method: str = "kaiming",
-        projection_prng_key: int = 0,
-        reinit_threshold: int = 512,
         **kwargs,
     ) -> None:
         # this gets the init from nn.Linear's super perspective, i.e. nn.Module.__init__, which should always be called
@@ -202,10 +242,22 @@ class Linear(nn.Linear, UoraLayer):
         self.fan_in_fan_out = fan_in_fan_out
 
         self._active_adapter = adapter_name
-        self.update_layer(adapter_name, uora_A, uora_B, r, uora_dropout, init_weights, d_initial=d_initial, initialization_method=initialization_method, projection_prng_key=projection_prng_key, reinit_threshold=reinit_threshold)
+        self.update_layer(
+            adapter_name,
+            uora_A,
+            uora_B,
+            r,
+            uora_dropout,
+            init_weights,
+            d_initial=d_initial,
+            initialization_method=kwargs.get("initialization_method", "kaiming"),
+            projection_prng_key=kwargs.get("projection_prng_key", 0),
+            reinit_threshold=kwargs.get("reinit_threshold", 0),
+            below_threshold_max_count=kwargs.get("below_threshold_max_count", 0),
+        )
         self.is_target_conv_1d_layer = is_target_conv_1d_layer
 
-        print(f"\033[95mXYZ::Linear Layer:initialization_method:{initialization_method} - projection_prng_key:{projection_prng_key} - reinit_threshold:{reinit_threshold}\033[0m")
+        print(f"\033[95mXYZ::Linear Layer:initialization_method:{kwargs.get("initialization_method", "kaiming")} - projection_prng_key:{kwargs.get("projection_prng_key", 0)} - reinit_threshold:{kwargs.get("reinit_threshold", 0)}\033[0m")
 
     def merge(self, safe_merge: bool = False, adapter_names: Optional[List[str]] = None) -> None:
         """
@@ -330,10 +382,23 @@ class Linear(nn.Linear, UoraLayer):
                 x = x.to(lambda_d.dtype)
                 result = result + lambda_b * F.linear(lambda_d * F.linear(dropout(x), sliced_A), sliced_B)
 
-        self.increment_update_counter()
-        if self.reinit_threshold > 0 and self._update_counter >= self.reinit_threshold:
-            self.update_frozen_AB()
-            self._update_counter = 0
+                if self.training and self.below_threshold_max_count > 0:
+                        threshold = 1e-5
+                        for idx, val in enumerate(lambda_d):
+                            if torch.abs(val) < threshold:
+                                self.lambda_d_below_threshold_counter[idx] += 1
+                                print(f"\033[91mIndex: {idx}, Value: {val.item()}, Counter: {self.lambda_d_below_threshold_counter[idx]}\033[0m")
+                                if self.lambda_d_below_threshold_counter[idx] >= self.below_threshold_max_count:
+                                    print(f"\033[93mReinitializing UORA lambda_d for index {idx}, threshold: {self.below_threshold_max_count}\033[0m")
+                                    self.uora_A[active_adapter] = self.reinit_uora_matrix_at_index(self.uora_A[active_adapter], active_adapter, idx, row=True)
+                                    self.uora_B[active_adapter] = self.reinit_uora_matrix_at_index(self.uora_B[active_adapter], active_adapter, idx, row=False)
+                                    self.lambda_d_below_threshold_counter[idx] = 0
+
+        if self.training and self.reinit_threshold > 0:
+            self.increment_update_counter()
+            if self._update_counter >= self.reinit_threshold:
+                self.update_frozen_AB()
+                self._update_counter = 0
 
         result = result.to(previous_dtype)
         return result

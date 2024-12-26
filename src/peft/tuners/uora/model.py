@@ -114,30 +114,40 @@ class UoraModel(BaseTuner):
         return largest_shape
 
     def _init_uora_A_uora_B(self, config: UoraConfig, adapter_name: str) -> None:
+        """
+        Initialize UORA projection matrices A and B.
+
+        Args:
+            config: UORA configuration object
+            adapter_name: Name of the adapter
+        """
+        # Get dimensions for the projection matrices
         linear_out_dim, linear_in_dim = self._find_dim(config)
 
-        # use of persistent to exclude uora_A and uora_B from the state dict if we choose not to save them.
+        # Initialize buffer dictionaries
         self.uora_A = BufferDict({}, persistent=config.save_projection)
         self.uora_B = BufferDict({}, persistent=config.save_projection)
 
-        # deterministic init of uora_A and uora_B if we know the key
-        generator = torch.Generator(device="cpu").manual_seed(config.projection_prng_key)
+        # Initialize random number generator
+        generator = torch.Generator().manual_seed(config.projection_prng_key)
 
-        if config.initialization_method == "kaiming":
-            uora_A = _kaiming_init((config.r, linear_in_dim), generator=generator)
-            uora_B = _kaiming_init((linear_out_dim, config.r), generator=generator)
-        elif config.initialization_method == "xavier":
-            uora_A = _xavier_init((config.r, linear_in_dim), generator=generator)
-            uora_B = _xavier_init((linear_out_dim, config.r), generator=generator)
-        elif config.initialization_method == "orthogonal":
-            uora_A = _orthogonal_init((config.r, linear_in_dim), generator=generator)
-            uora_B = _orthogonal_init((linear_out_dim, config.r), generator=generator)
-        elif config.initialization_method == "random":
-            uora_A = _random_init((config.r, linear_in_dim), generator=generator)
-            uora_B = _random_init((linear_out_dim, config.r), generator=generator)
-        else:
+        # Initialize matrices based on specified method
+        init_methods = {
+            "kaiming": _kaiming_init,
+            "xavier": _xavier_init,
+            "orthogonal": _orthogonal_init,
+            "random": _random_init
+        }
+
+        init_func = init_methods.get(config.initialization_method)
+        if init_func is None:
             raise ValueError(f"Unknown initialization method: {config.initialization_method}")
 
+        # Create matrices A and B using the selected initialization
+        uora_A = init_func((config.r, linear_in_dim), generator=generator)
+        uora_B = init_func((linear_out_dim, config.r), generator=generator)
+
+        # Store matrices in buffer dictionaries
         self.uora_A[adapter_name] = uora_A
         self.uora_B[adapter_name] = uora_B
 
@@ -195,8 +205,10 @@ class UoraModel(BaseTuner):
             "uora_dropout": uora_config.uora_dropout,
             "fan_in_fan_out": uora_config.fan_in_fan_out,
             "init_weights": uora_config.init_weights,
-            # "loaded_in_8bit": getattr(self.model, "is_loaded_in_8bit", False),
-            # "loaded_in_4bit": getattr(self.model, "is_loaded_in_4bit", False),
+            "initialization_method": uora_config.initialization_method,
+            "projection_prng_key": uora_config.projection_prng_key,
+            "reinit_threshold": uora_config.reinit_threshold,
+            "below_threshold_max_count": uora_config.below_threshold_max_count,
         }
         kwargs["bias"] = bias
 
@@ -212,6 +224,7 @@ class UoraModel(BaseTuner):
                 initialization_method=uora_config.initialization_method,
                 projection_prng_key=uora_config.projection_prng_key,
                 reinit_threshold=uora_config.reinit_threshold,
+                below_threshold_max_count=uora_config.below_threshold_max_count,
             )
         else:
             new_module = self._create_new_module(uora_config, self.uora_A, self.uora_B, adapter_name, target, **kwargs)
@@ -272,45 +285,14 @@ class UoraModel(BaseTuner):
 
     @staticmethod
     def _create_new_module(uora_config, uora_A, uora_B, adapter_name, target, **kwargs):
-        # avoid eager bnb import
-        # if is_bnb_available():
-        #     import bitsandbytes as bnb
-
-        #     from .bnb import Linear8bitLt
-
-        # if is_bnb_4bit_available():
-        #     from .bnb import Linear4bit
 
         bias = kwargs.pop("bias", False)
-        # loaded_in_8bit = kwargs.get("loaded_in_8bit", False)
-        # loaded_in_4bit = kwargs.get("loaded_in_4bit", False)
 
         if isinstance(target, BaseTunerLayer):
             target_base_layer = target.get_base_layer()
         else:
             target_base_layer = target
 
-        # if loaded_in_8bit and isinstance(target_base_layer, bnb.nn.Linear8bitLt):
-        #     eightbit_kwargs = kwargs.copy()
-        #     eightbit_kwargs.update(
-        #         {
-        #             "has_fp16_weights": target_base_layer.state.has_fp16_weights,
-        #             "memory_efficient_backward": target_base_layer.state.memory_efficient_backward,
-        #             "threshold": target_base_layer.state.threshold,
-        #             "index": target_base_layer.index,
-        #         }
-        #     )
-        #     return Linear8bitLt(target, adapter_name, uora_A, uora_B, **eightbit_kwargs)
-        # elif loaded_in_4bit and isinstance(target_base_layer, bnb.nn.Linear4bit):
-        #     fourbit_kwargs = kwargs.copy()
-        #     fourbit_kwargs.update(
-        #         {
-        #             "compute_dtype": target_base_layer.compute_dtype,
-        #             "compress_statistics": target_base_layer.weight.compress_statistics,
-        #             "quant_type": target_base_layer.weight.quant_type,
-        #         }
-        #     )
-        #     return Linear4bit(target, adapter_name, uora_A, uora_B, **fourbit_kwargs)
         if isinstance(target_base_layer, torch.nn.Linear):
             if kwargs["fan_in_fan_out"]:
                 warnings.warn(
@@ -331,6 +313,10 @@ class UoraModel(BaseTuner):
                 f"Target module {target} is not supported. Currently, only the following modules are supported: "
                 "`torch.nn.Linear`, `transformers.pytorch_utils.Conv1D`."
             )
+        kwargs["initialization_method"] = uora_config.initialization_method
+        kwargs["projection_prng_key"] = uora_config.projection_prng_key
+        kwargs["reinit_threshold"] = uora_config.reinit_threshold
+        kwargs["below_threshold_max_count"] = uora_config.below_threshold_max_count
         new_module = Linear(
             target,
             uora_A,
@@ -338,9 +324,6 @@ class UoraModel(BaseTuner):
             adapter_name,
             bias=bias,
             d_initial=uora_config.d_initial,
-            initialization_method=uora_config.initialization_method,
-            projection_prng_key=uora_config.projection_prng_key,
-            reinit_threshold=uora_config.reinit_threshold,
             **kwargs,
         )
 
