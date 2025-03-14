@@ -74,7 +74,25 @@ class VeraLayer(BaseTunerLayer):
         vera_dropout,
         init_weights,
         d_initial: float = 0.1,
+        enable_uora: bool = False,
+        alpha: float = .5,
+        tau: float = 1e-5,
+        count_k: int = 1,
+        gradient_accumulation_steps: int = 1,
     ):
+        self.enable_uora = enable_uora
+        if enable_uora:
+            self.lambda_d_counter = torch.zeros(r, dtype=torch.int32)
+            self.gradient_step = 0
+            # self.gradient_accumulation_steps = 4
+            self.gradient_accumulation_steps = gradient_accumulation_steps
+            self.alpha = alpha
+            self.tau = tau
+            self.count_k = count_k
+            # print(type(self.alpha))
+            # print(type(self.tau))
+            # print(type(self.count_k))
+            # exit()
         if r <= 0:
             raise ValueError(f"`r` should be a positive integer value but the value passed is {r}")
         self.r[adapter_name] = r
@@ -137,6 +155,29 @@ class VeraLayer(BaseTunerLayer):
                 nn.init.zeros_(self.vera_lambda_d[adapter_name]).fill_(d_initial)
                 nn.init.zeros_(self.vera_lambda_b[adapter_name])
 
+    def reinit_uora_matrix_at_index(self, matrix: torch.Tensor, active_adapter:str, idx: int, row: bool = True) -> torch.Tensor:
+        # hyperparameter for interpolation
+        alpha = self.alpha
+        base_matrix = matrix.clone()
+        reinit_matrix = nn.init.orthogonal_(torch.empty_like(base_matrix), generator=torch.Generator(device='cuda').manual_seed(33))
+        if row:
+            base_matrix[idx, :] = alpha * base_matrix[idx, :] + (1-alpha) * reinit_matrix[idx, :]
+        else:
+            base_matrix[:, idx] = alpha * base_matrix[:, idx] + (1-alpha) * reinit_matrix[:, idx]
+        return base_matrix
+
+    def run_uora(self, active_adapter: str, lambda_d: torch.Tensor):
+        if self.gradient_step % self.gradient_accumulation_steps == 0:
+            for idx, val in enumerate(lambda_d):
+                if val.abs() < self.tau:
+                    self.lambda_d_counter[idx] += 1
+                    print(f"\033[91mActive adaptor: {active_adapter}, Index: {idx}, Value: {val.item()}, Counter: {self.lambda_d_counter[idx]}, Gradient step: {self.gradient_step}\033[0m")
+                    if self.lambda_d_counter[idx] % self.count_k == 0:
+                        print("\033[95mReinitializing UORA\033[0m")
+                        self.vera_A[active_adapter] = self.reinit_uora_matrix_at_index(self.vera_A[active_adapter], active_adapter, idx, row=True)
+                        self.vera_B[active_adapter] = self.reinit_uora_matrix_at_index(self.vera_B[active_adapter], active_adapter, idx, row=False)
+        self.gradient_step += 1
+
 
 class Linear(nn.Linear, VeraLayer):
     # Vera implemented in a dense layer
@@ -160,7 +201,7 @@ class Linear(nn.Linear, VeraLayer):
         self.fan_in_fan_out = fan_in_fan_out
 
         self._active_adapter = adapter_name
-        self.update_layer(adapter_name, vera_A, vera_B, r, vera_dropout, init_weights, d_initial=d_initial)
+        self.update_layer(adapter_name, vera_A, vera_B, r, vera_dropout, init_weights, d_initial=d_initial, enable_uora=kwargs["enable_uora"], alpha=kwargs["alpha"], tau=kwargs["tau"], count_k=kwargs["count_k"], gradient_accumulation_steps=kwargs["gradient_accumulation_steps"])
         self.is_target_conv_1d_layer = is_target_conv_1d_layer
 
     def merge(self, safe_merge: bool = False, adapter_names: Optional[List[str]] = None) -> None:
@@ -285,6 +326,9 @@ class Linear(nn.Linear, VeraLayer):
                 dropout = self.vera_dropout[active_adapter]
                 x = x.to(lambda_d.dtype)
                 result = result + lambda_b * F.linear(lambda_d * F.linear(dropout(x), sliced_A), sliced_B)
+
+                if self.training and self.enable_uora:
+                    self.run_uora(active_adapter, lambda_d)
 
         result = result.to(previous_dtype)
         return result

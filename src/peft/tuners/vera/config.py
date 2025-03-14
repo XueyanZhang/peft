@@ -144,6 +144,26 @@ class VeraConfig(PeftConfig):
             )
         },
     )
+    enable_uora: bool = field(
+        default=False,
+        metadata={"help": "Enable UORA for the Vera model. Default is False."},
+    )
+    alpha: float = field(
+        default=0.5,
+        metadata={"help": "Alpha value for UORA. Default is 0.5."},
+    )
+    tau: float = field(
+        default=1e-5,
+        metadata={"help": "Tau value for UORA. Default is 0.5."},
+    )
+    count_k: int = field(
+        default=1,
+        metadata={"help": "Count of k for UORA. Default is 1."},
+    )
+    gradient_accumulation_steps: int = field(
+        default=1,
+        metadata={"help": "Number of gradient accumulation steps."},
+    )
 
     def __post_init__(self):
         super().__post_init__()

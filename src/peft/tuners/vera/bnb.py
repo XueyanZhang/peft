@@ -270,6 +270,11 @@ if is_bnb_4bit_available():
                 vera_dropout=vera_dropout,
                 init_weights=init_weights,
                 d_initial=d_initial,
+                enable_uora=kwargs["enable_uora"],
+                alpha=kwargs["alpha"],
+                tau=kwargs["tau"],
+                count_k=kwargs["count_k"],
+                gradient_accumulation_steps=kwargs["gradient_accumulation_steps"],
             )
 
         def merge(self, safe_merge: bool = False, adapter_names: Optional[list[str]] = None) -> None:
@@ -395,6 +400,9 @@ if is_bnb_4bit_available():
                     adapter_output = lambda_b * torch.nn.functional.linear(
                         lambda_d * torch.nn.functional.linear(x_temp, sliced_A), sliced_B
                     )
+
+                    if self.training and self.enable_uora:
+                        self.run_uora(active_adapter, lambda_d)
 
                     if requires_conversion:
                         adapter_output = adapter_output.to(expected_dtype)

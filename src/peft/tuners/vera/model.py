@@ -68,6 +68,34 @@ def _kaiming_init(
     with torch.no_grad():
         return tensor.uniform_(-bound, bound, generator=generator)
 
+def _orthogonal_init(
+    tensor_or_shape: Union[torch.Tensor, tuple[int, ...]],
+    generator: torch.Generator,
+) -> torch.Tensor:
+    """
+    Orthogonal Initialisation adapted to accept a `torch.Generator` object for PRNG.
+
+    Args:
+        tensor_or_shape (`Union[torch.Tensor, tuple[int, ...]]`):
+            Tensor to initialise, or shape of new tensor to create and then initialise.
+        generator: (`torch.Generator`):
+            Generator object that manages the state of the PRNG algorithm in use.
+
+    Returns:
+        `torch.Tensor`: The initialised tensor.
+    """
+    if isinstance(tensor_or_shape, tuple):
+        tensor = torch.empty(tensor_or_shape)
+    else:
+        tensor = tensor_or_shape
+
+    with torch.no_grad():
+        random_mat = torch.randn(tensor.shape, generator=generator)
+        u, _, v = torch.svd(random_mat)
+        q = u if u.shape == tensor.shape else v.t()
+        q = q.reshape(tensor.shape)
+        return tensor.copy_(q)
+
 
 class VeraModel(BaseTuner):
     """
@@ -153,6 +181,13 @@ class VeraModel(BaseTuner):
         vera_A = _kaiming_init((config.r, linear_in_dim), generator=generator)
         vera_B = _kaiming_init((linear_out_dim, config.r), generator=generator)
 
+        if config.enable_uora:
+            print('\033[95menable_uora\033[0m')
+            print('\033[95morthogonal init\033[0m')
+            print(f'\033[95mgradient_accumulation_steps{config.gradient_accumulation_steps}\033[0m')
+            vera_A = _orthogonal_init((config.r, linear_in_dim), generator=generator)
+            vera_B = _orthogonal_init((linear_out_dim, config.r), generator=generator)
+
         self.vera_A[adapter_name] = vera_A
         self.vera_B[adapter_name] = vera_B
 
@@ -219,6 +254,11 @@ class VeraModel(BaseTuner):
             "init_weights": vera_config.init_weights,
             "loaded_in_8bit": getattr(self.model, "is_loaded_in_8bit", False),
             "loaded_in_4bit": getattr(self.model, "is_loaded_in_4bit", False),
+            "enable_uora": vera_config.enable_uora,
+            "alpha": vera_config.alpha,
+            "tau": vera_config.tau,
+            "count_k": vera_config.count_k,
+            "gradient_accumulation_steps": vera_config.gradient_accumulation_steps,
         }
         kwargs["bias"] = bias
 
@@ -231,6 +271,11 @@ class VeraModel(BaseTuner):
                 vera_config.vera_dropout,
                 vera_config.init_weights,
                 d_initial=vera_config.d_initial,
+                enable_uora=vera_config.enable_uora,
+                alpha=vera_config.alpha,
+                tau=vera_config.tau,
+                count_k=vera_config.count_k,
+                gradient_accumulation_steps=vera_config.gradient_accumulation_steps,
             )
         else:
             new_module = self._create_new_module(vera_config, self.vera_A, self.vera_B, adapter_name, target, **kwargs)
@@ -349,6 +394,11 @@ class VeraModel(BaseTuner):
                 f"Target module {target} is not supported. Currently, only the following modules are supported: "
                 "`torch.nn.Linear`, `transformers.pytorch_utils.Conv1D`."
             )
+        kwargs["enable_uora"] = vera_config.enable_uora
+        kwargs["alpha"] = vera_config.alpha
+        kwargs["tau"] = vera_config.tau
+        kwargs["count_k"] = vera_config.count_k
+        kwargs["gradient_accumulation_steps"] = vera_config.gradient_accumulation_steps
         new_module = Linear(
             target,
             vera_A,

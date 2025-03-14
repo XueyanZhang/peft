@@ -1,0 +1,240 @@
+From 1a07c21eb305a94da3d65061553ade2efe05ac1c Mon Sep 17 00:00:00 2001
+From: zhaojinm <jinman.zhao@mail.utoronto.ca>
+Date: Fri, 21 Feb 2025 17:17:02 -0500
+Subject: [PATCH] add run_uora function
+
+---
+ src/peft/tuners/vera/bnb.py    |  8 ++++++
+ src/peft/tuners/vera/config.py | 20 ++++++++++++++
+ src/peft/tuners/vera/layer.py  | 46 ++++++++++++++++++++++++++++++-
+ src/peft/tuners/vera/model.py  | 50 ++++++++++++++++++++++++++++++++++
+ 4 files changed, 123 insertions(+), 1 deletion(-)
+
+diff --git a/src/peft/tuners/vera/bnb.py b/src/peft/tuners/vera/bnb.py
+index 1bc6fbc..5cc7b8b 100644
+--- a/src/peft/tuners/vera/bnb.py
++++ b/src/peft/tuners/vera/bnb.py
+@@ -270,6 +270,11 @@ if is_bnb_4bit_available():
+                 vera_dropout=vera_dropout,
+                 init_weights=init_weights,
+                 d_initial=d_initial,
++                enable_uora=kwargs["enable_uora"],
++                alpha=kwargs["alpha"],
++                tau=kwargs["tau"],
++                count_k=kwargs["count_k"],
++                gradient_accumulation_steps=kwargs["gradient_accumulation_steps"],
+             )
+ 
+         def merge(self, safe_merge: bool = False, adapter_names: Optional[list[str]] = None) -> None:
+@@ -396,6 +401,9 @@ if is_bnb_4bit_available():
+                         lambda_d * torch.nn.functional.linear(x_temp, sliced_A), sliced_B
+                     )
+ 
++                    if self.training and self.enable_uora:
++                        self.run_uora(active_adapter, lambda_d)
++
+                     if requires_conversion:
+                         adapter_output = adapter_output.to(expected_dtype)
+ 
+diff --git a/src/peft/tuners/vera/config.py b/src/peft/tuners/vera/config.py
+index 5a8eaa4..e5675e7 100644
+--- a/src/peft/tuners/vera/config.py
++++ b/src/peft/tuners/vera/config.py
+@@ -144,6 +144,26 @@ class VeraConfig(PeftConfig):
+             )
+         },
+     )
++    enable_uora: bool = field(
++        default=False,
++        metadata={"help": "Enable UORA for the Vera model. Default is False."},
++    )
++    alpha: float = field(
++        default=0.5,
++        metadata={"help": "Alpha value for UORA. Default is 0.5."},
++    )
++    tau: float = field(
++        default=1e-5,
++        metadata={"help": "Tau value for UORA. Default is 0.5."},
++    )
++    count_k: int = field(
++        default=1,
++        metadata={"help": "Count of k for UORA. Default is 1."},
++    )
++    gradient_accumulation_steps: int = field(
++        default=1,
++        metadata={"help": "Number of gradient accumulation steps."},
++    )
+ 
+     def __post_init__(self):
+         super().__post_init__()
+diff --git a/src/peft/tuners/vera/layer.py b/src/peft/tuners/vera/layer.py
+index 25789e8..13bc61b 100644
+--- a/src/peft/tuners/vera/layer.py
++++ b/src/peft/tuners/vera/layer.py
+@@ -74,7 +74,25 @@ class VeraLayer(BaseTunerLayer):
+         vera_dropout,
+         init_weights,
+         d_initial: float = 0.1,
++        enable_uora: bool = False,
++        alpha: float = .5,
++        tau: float = 1e-5,
++        count_k: int = 1,
++        gradient_accumulation_steps: int = 1,
+     ):
++        self.enable_uora = enable_uora
++        if enable_uora:
++            self.lambda_d_counter = torch.zeros(r, dtype=torch.int32)
++            self.gradient_step = 0
++            # self.gradient_accumulation_steps = 4
++            self.gradient_accumulation_steps = gradient_accumulation_steps
++            self.alpha = alpha
++            self.tau = tau
++            self.count_k = count_k
++            # print(type(self.alpha))
++            # print(type(self.tau))
++            # print(type(self.count_k))
++            # exit()
+         if r <= 0:
+             raise ValueError(f"`r` should be a positive integer value but the value passed is {r}")
+         self.r[adapter_name] = r
+@@ -137,6 +155,29 @@ class VeraLayer(BaseTunerLayer):
+                 nn.init.zeros_(self.vera_lambda_d[adapter_name]).fill_(d_initial)
+                 nn.init.zeros_(self.vera_lambda_b[adapter_name])
+ 
++    def reinit_uora_matrix_at_index(self, matrix: torch.Tensor, active_adapter:str, idx: int, row: bool = True) -> torch.Tensor:
++        # hyperparameter for interpolation
++        alpha = self.alpha
++        base_matrix = matrix.clone()
++        reinit_matrix = nn.init.orthogonal_(torch.empty_like(base_matrix), generator=torch.Generator(device='cuda').manual_seed(33))
++        if row:
++            base_matrix[idx, :] = alpha * base_matrix[idx, :] + (1-alpha) * reinit_matrix[idx, :]
++        else:
++            base_matrix[:, idx] = alpha * base_matrix[:, idx] + (1-alpha) * reinit_matrix[:, idx]
++        return base_matrix
++
++    def run_uora(self, active_adapter: str, lambda_d: torch.Tensor):
++        if self.gradient_step % self.gradient_accumulation_steps == 0:
++            for idx, val in enumerate(lambda_d):
++                if val.abs() < self.tau:
++                    self.lambda_d_counter[idx] += 1
++                    print(f"\033[91mActive adaptor: {active_adapter}, Index: {idx}, Value: {val.item()}, Counter: {self.lambda_d_counter[idx]}, Gradient step: {self.gradient_step}\033[0m")
++                    if self.lambda_d_counter[idx] % self.count_k == 0:
++                        print("\033[95mReinitializing UORA\033[0m")
++                        self.vera_A[active_adapter] = self.reinit_uora_matrix_at_index(self.vera_A[active_adapter], active_adapter, idx, row=True)
++                        self.vera_B[active_adapter] = self.reinit_uora_matrix_at_index(self.vera_B[active_adapter], active_adapter, idx, row=False)
++        self.gradient_step += 1
++
+ 
+ class Linear(nn.Linear, VeraLayer):
+     # Vera implemented in a dense layer
+@@ -160,7 +201,7 @@ class Linear(nn.Linear, VeraLayer):
+         self.fan_in_fan_out = fan_in_fan_out
+ 
+         self._active_adapter = adapter_name
+-        self.update_layer(adapter_name, vera_A, vera_B, r, vera_dropout, init_weights, d_initial=d_initial)
++        self.update_layer(adapter_name, vera_A, vera_B, r, vera_dropout, init_weights, d_initial=d_initial, enable_uora=kwargs["enable_uora"], alpha=kwargs["alpha"], tau=kwargs["tau"], count_k=kwargs["count_k"], gradient_accumulation_steps=kwargs["gradient_accumulation_steps"])
+         self.is_target_conv_1d_layer = is_target_conv_1d_layer
+ 
+     def merge(self, safe_merge: bool = False, adapter_names: Optional[List[str]] = None) -> None:
+@@ -286,6 +327,9 @@ class Linear(nn.Linear, VeraLayer):
+                 x = x.to(lambda_d.dtype)
+                 result = result + lambda_b * F.linear(lambda_d * F.linear(dropout(x), sliced_A), sliced_B)
+ 
++                if self.training and self.enable_uora:
++                    self.run_uora(active_adapter, lambda_d)
++
+         result = result.to(previous_dtype)
+         return result
+ 
+diff --git a/src/peft/tuners/vera/model.py b/src/peft/tuners/vera/model.py
+index f863a07..68e0669 100644
+--- a/src/peft/tuners/vera/model.py
++++ b/src/peft/tuners/vera/model.py
+@@ -68,6 +68,34 @@ def _kaiming_init(
+     with torch.no_grad():
+         return tensor.uniform_(-bound, bound, generator=generator)
+ 
++def _orthogonal_init(
++    tensor_or_shape: Union[torch.Tensor, tuple[int, ...]],
++    generator: torch.Generator,
++) -> torch.Tensor:
++    """
++    Orthogonal Initialisation adapted to accept a `torch.Generator` object for PRNG.
++
++    Args:
++        tensor_or_shape (`Union[torch.Tensor, tuple[int, ...]]`):
++            Tensor to initialise, or shape of new tensor to create and then initialise.
++        generator: (`torch.Generator`):
++            Generator object that manages the state of the PRNG algorithm in use.
++
++    Returns:
++        `torch.Tensor`: The initialised tensor.
++    """
++    if isinstance(tensor_or_shape, tuple):
++        tensor = torch.empty(tensor_or_shape)
++    else:
++        tensor = tensor_or_shape
++
++    with torch.no_grad():
++        random_mat = torch.randn(tensor.shape, generator=generator)
++        u, _, v = torch.svd(random_mat)
++        q = u if u.shape == tensor.shape else v.t()
++        q = q.reshape(tensor.shape)
++        return tensor.copy_(q)
++
+ 
+ class VeraModel(BaseTuner):
+     """
+@@ -153,6 +181,13 @@ class VeraModel(BaseTuner):
+         vera_A = _kaiming_init((config.r, linear_in_dim), generator=generator)
+         vera_B = _kaiming_init((linear_out_dim, config.r), generator=generator)
+ 
++        if config.enable_uora:
++            print('\033[95menable_uora\033[0m')
++            print('\033[95morthogonal init\033[0m')
++            print(f'\033[95mgradient_accumulation_steps{config.gradient_accumulation_steps}\033[0m')
++            vera_A = _orthogonal_init((config.r, linear_in_dim), generator=generator)
++            vera_B = _orthogonal_init((linear_out_dim, config.r), generator=generator)
++
+         self.vera_A[adapter_name] = vera_A
+         self.vera_B[adapter_name] = vera_B
+ 
+@@ -219,6 +254,11 @@ class VeraModel(BaseTuner):
+             "init_weights": vera_config.init_weights,
+             "loaded_in_8bit": getattr(self.model, "is_loaded_in_8bit", False),
+             "loaded_in_4bit": getattr(self.model, "is_loaded_in_4bit", False),
++            "enable_uora": vera_config.enable_uora,
++            "alpha": vera_config.alpha,
++            "tau": vera_config.tau,
++            "count_k": vera_config.count_k,
++            "gradient_accumulation_steps": vera_config.gradient_accumulation_steps,
+         }
+         kwargs["bias"] = bias
+ 
+@@ -231,6 +271,11 @@ class VeraModel(BaseTuner):
+                 vera_config.vera_dropout,
+                 vera_config.init_weights,
+                 d_initial=vera_config.d_initial,
++                enable_uora=vera_config.enable_uora,
++                alpha=vera_config.alpha,
++                tau=vera_config.tau,
++                count_k=vera_config.count_k,
++                gradient_accumulation_steps=vera_config.gradient_accumulation_steps,
+             )
+         else:
+             new_module = self._create_new_module(vera_config, self.vera_A, self.vera_B, adapter_name, target, **kwargs)
+@@ -350,6 +395,11 @@ class VeraModel(BaseTuner):
+                 f"Target module {target} is not supported. Currently, only the following modules are supported: "
+                 "`torch.nn.Linear`, `transformers.pytorch_utils.Conv1D`."
+             )
++        kwargs["enable_uora"] = vera_config.enable_uora
++        kwargs["alpha"] = vera_config.alpha
++        kwargs["tau"] = vera_config.tau
++        kwargs["count_k"] = vera_config.count_k
++        kwargs["gradient_accumulation_steps"] = vera_config.gradient_accumulation_steps
+         new_module = Linear(
+             target,
+             vera_A,
+-- 
+2.34.1
+
