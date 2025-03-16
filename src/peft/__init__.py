@@ -87,6 +87,8 @@ from .tuners import (
     VeraModel,
     FourierFTConfig,
     FourierFTModel,
+    HoRAConfig,
+    HoRAModel,
     XLoraConfig,
     XLoraModel,
     HRAConfig,

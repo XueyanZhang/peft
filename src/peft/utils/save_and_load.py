@@ -181,6 +181,8 @@ def get_peft_model_state_dict(
             to_return["base_model.vera_B." + adapter_name] = state_dict["base_model.vera_B." + adapter_name]
     elif config.peft_type == PeftType.FOURIERFT:
         to_return = {k: state_dict[k] for k in state_dict if "fourierft_" in k}
+    elif config.peft_type == PeftType.HORA:
+        to_return = {k: state_dict[k] for k in state_dict if "hora_" in k}
     elif config.peft_type == PeftType.XLORA:
         to_return = {k: state_dict[k] for k in state_dict if "internal_xlora_classifier" in k}
     elif config.peft_type == PeftType.HRA:
