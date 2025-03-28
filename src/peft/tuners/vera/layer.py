@@ -159,7 +159,7 @@ class VeraLayer(BaseTunerLayer):
         # hyperparameter for interpolation
         alpha = self.alpha
         base_matrix = matrix.clone()
-        reinit_matrix = nn.init.orthogonal_(torch.empty_like(base_matrix), generator=torch.Generator(device='cuda').manual_seed(33))
+        reinit_matrix = nn.init.orthogonal_(torch.empty_like(base_matrix), generator=torch.Generator(device='cuda').manual_seed(0+self.count_k*10))
         if row:
             base_matrix[idx, :] = alpha * base_matrix[idx, :] + (1-alpha) * reinit_matrix[idx, :]
         else:
