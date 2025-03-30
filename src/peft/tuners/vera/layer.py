@@ -155,11 +155,16 @@ class VeraLayer(BaseTunerLayer):
                 nn.init.zeros_(self.vera_lambda_d[adapter_name]).fill_(d_initial)
                 nn.init.zeros_(self.vera_lambda_b[adapter_name])
 
+    def get_dynamic_alpha(self, idx):
+        decay = 0.05  # How much α drops per reinit
+        return max(0.5, self.alpha - self.lambda_d_counter[idx] * decay)
+
     def reinit_uora_matrix_at_index(self, matrix: torch.Tensor, active_adapter:str, idx: int, row: bool = True) -> torch.Tensor:
         # hyperparameter for interpolation
-        alpha = self.alpha
+        # alpha = self.alpha
+        alpha = self.get_dynamic_alpha(idx)
         base_matrix = matrix.clone()
-        reinit_matrix = nn.init.orthogonal_(torch.empty_like(base_matrix), generator=torch.Generator(device='cuda').manual_seed(0+self.count_k*10))
+        reinit_matrix = nn.init.orthogonal_(torch.empty_like(base_matrix, device=base_matrix.device), generator=torch.Generator(device=base_matrix.device).manual_seed(0+self.count_k*10))
         if row:
             base_matrix[idx, :] = alpha * base_matrix[idx, :] + (1-alpha) * reinit_matrix[idx, :]
         else:
