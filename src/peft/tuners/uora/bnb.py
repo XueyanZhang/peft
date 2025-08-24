@@ -24,38 +24,42 @@ from peft.tuners.tuners_utils import check_adapters_to_merge
 from peft.utils.integrations import dequantize_bnb_weight
 from peft.utils.other import transpose
 
-from .layer import VeraLayer
+from .layer import UoraLayer
 
 
 if is_bnb_available():
 
-    class Linear8bitLt(torch.nn.Module, VeraLayer):
+    class Linear8bitLt(torch.nn.Module, UoraLayer):
         def __init__(
             self,
             base_layer: torch.nn.Module,
             adapter_name: str,
-            vera_A,
-            vera_B,
+            uora_A,
+            uora_B,
             r: int = 0,
-            vera_dropout: float = 0.0,
+            uora_dropout: float = 0.0,
             fan_in_fan_out: bool = False,
             init_weights: bool = True,
             d_initial: float = 0.1,
             **kwargs,
         ) -> None:
             super().__init__()
-            VeraLayer.__init__(self, base_layer)
+            UoraLayer.__init__(self, base_layer, **kwargs)
             self.fan_in_fan_out = fan_in_fan_out
 
             self._active_adapter = adapter_name
             self.update_layer(
                 adapter_name,
-                vera_A,
-                vera_B,
+                uora_A,
+                uora_B,
                 r,
-                vera_dropout=vera_dropout,
+                uora_dropout=uora_dropout,
                 init_weights=init_weights,
                 d_initial=d_initial,
+                alpha=kwargs.get("alpha", 0.5),
+                tau=kwargs.get("tau", 1e-5),
+                count_k=kwargs.get("count_k", 1),
+                gradient_accumulation_steps=kwargs.get("gradient_accumulation_steps", 1),
             )
 
         def merge(self, safe_merge: bool = False, adapter_names: Optional[list[str]] = None) -> None:
@@ -70,13 +74,13 @@ if is_bnb_available():
                 return
 
             for active_adapter in adapter_names:
-                if active_adapter not in self.vera_lambda_d.keys():
+                if active_adapter not in self.uora_lambda_d.keys():
                     continue
 
                 warnings.warn(
-                    "Merge vera module to 8-bit linear may get different generations due to rounding errors."
+                    "Merge UORA module to 8-bit linear may get different generations due to rounding errors."
                 )
-                vera_data = self.get_delta_weight(active_adapter)
+                uora_data = self.get_delta_weight(active_adapter)
 
                 weight = self.get_base_layer().weight
                 state = self.get_base_layer().state
@@ -84,7 +88,7 @@ if is_bnb_available():
                     state.SCB = weight.SCB
 
                 output = dequantize_bnb_weight(weight, state)
-                w_data = output.to(vera_data.dtype).to(vera_data.device) + vera_data
+                w_data = output.to(uora_data.dtype).to(uora_data.device) + uora_data
 
                 if safe_merge and not torch.isfinite(w_data).all():
                     raise ValueError(
@@ -104,12 +108,12 @@ if is_bnb_available():
 
             while len(self.merged_adapters) > 0:
                 active_adapter = self.merged_adapters.pop()
-                if active_adapter not in self.vera_lambda_d.keys():
+                if active_adapter not in self.uora_lambda_d.keys():
                     continue
                 warnings.warn(
-                    "Unmerge vera module to 8-bit linear may get different generations due to rounding errors."
+                    "Unmerge UORA module to 8-bit linear may get different generations due to rounding errors."
                 )
-                vera_data = self.get_delta_weight(active_adapter)
+                uora_data = self.get_delta_weight(active_adapter)
 
                 weight = self.get_base_layer().weight
                 state = self.get_base_layer().state
@@ -117,7 +121,7 @@ if is_bnb_available():
                     state.SCB = weight.SCB
                 output = dequantize_bnb_weight(weight, state=state)
 
-                w_data = output.to(vera_data.dtype).to(vera_data.device) - vera_data
+                w_data = output.to(uora_data.dtype).to(uora_data.device) - uora_data
 
                 self.get_base_layer().weight = bnb.nn.Int8Params(
                     w_data.to("cpu"), requires_grad=False, has_fp16_weights=weight.has_fp16_weights
@@ -132,43 +136,43 @@ if is_bnb_available():
                 adapter (str): The name of the adapter for which the delta weight should be computed.
 
             Returns:
-                torch.Tensor: The computed delta weight for the VeRA adapter.
+                torch.Tensor: The computed delta weight for the UORA adapter.
 
             Note:
-                This method implements the VeRA-specific weight update. Unlike LoRA, VeRA uses shared projection
-                matrices (vera_A and vera_B) across all layers, along with per-layer trainable parameters (lambda_d and
-                lambda_b).
+                This method implements the UORA-specific weight update. Like VeRA, UORA uses shared projection
+                matrices (uora_A and uora_B) across all layers, along with per-layer trainable parameters (lambda_d and
+                lambda_b), but with dynamic reinitialization capabilities.
             """
             # Retrieve shared projection matrices
-            vera_A = self.vera_A[adapter]
-            vera_B = self.vera_B[adapter]
+            uora_A = self.uora_A[adapter]
+            uora_B = self.uora_B[adapter]
 
             # Retrieve per-layer trainable parameters
-            device = vera_B.device
-            dtype = vera_B.dtype
+            device = uora_B.device
+            dtype = uora_B.dtype
 
             # In case users wants to merge the adapter weights that are in
             # (b)float16 while being on CPU, we need to cast the weights to float32, perform the merge and then cast back to
             # (b)float16 because some CPUs have slow bf16/fp16 matmuls.
             cast_to_fp32 = device.type == "cpu" and (dtype == torch.float16 or dtype == torch.bfloat16)
 
-            lambda_d = self.vera_lambda_d[adapter]
-            lambda_b = self.vera_lambda_b[adapter]
+            lambda_d = self.uora_lambda_d[adapter]
+            lambda_b = self.uora_lambda_b[adapter]
 
             if cast_to_fp32:
-                vera_A = vera_A.float()
-                vera_B = vera_B.float()
+                uora_A = uora_A.float()
+                uora_B = uora_B.float()
                 lambda_d = lambda_d.float()
                 lambda_b = lambda_b.float()
 
-            sliced_A = vera_A[:, : self.in_features].to(lambda_d.device)
-            sliced_B = vera_B[: self.out_features, :].to(lambda_d.device)
+            sliced_A = uora_A[:, : self.in_features].to(lambda_d.device)
+            sliced_B = uora_B[: self.out_features, :].to(lambda_d.device)
             lambda_b = lambda_b.unsqueeze(-1)
             lambda_d = lambda_d.unsqueeze(-1)
 
             # VeRA-specific computation:
-            # 1. Apply lambda_d to the input projection (vera_A)
-            # 2. Apply lambda_b to the output projection (vera_B)
+            # 1. Apply lambda_d to the input projection (uora_A)
+            # 2. Apply lambda_b to the output projection (uora_B)
             # 3. Compute the outer product of the scaled projections
             output_tensor = transpose((lambda_b * sliced_B) @ (lambda_d * sliced_A), self.fan_in_fan_out)
 
@@ -188,8 +192,8 @@ if is_bnb_available():
                 torch.Tensor: Output tensor after applying the VeRA adaptation.
 
             Note:
-                This method implements the VeRA-specific forward pass. It applies the shared projections (vera_A and
-                vera_B) along with the per-layer trainable parameters (lambda_d and lambda_b) to compute the adapter
+                This method implements the VeRA-specific forward pass. It applies the shared projections (uora_A and
+                uora_B) along with the per-layer trainable parameters (lambda_d and lambda_b) to compute the adapter
                 output.
             """
             if self.disable_adapters:
@@ -201,16 +205,16 @@ if is_bnb_available():
             else:
                 result = self.base_layer(x, *args, **kwargs)
                 for active_adapter in self.active_adapters:
-                    if active_adapter not in self.vera_lambda_d.keys():
+                    if active_adapter not in self.uora_lambda_d.keys():
                         continue
 
-                    lambda_d = self.vera_lambda_d[active_adapter]
-                    lambda_b = self.vera_lambda_b[active_adapter]
+                    lambda_d = self.uora_lambda_d[active_adapter]
+                    lambda_b = self.uora_lambda_b[active_adapter]
 
-                    vera_A = self.vera_A[active_adapter]
-                    vera_B = self.vera_B[active_adapter]
+                    uora_A = self.uora_A[active_adapter]
+                    uora_B = self.uora_B[active_adapter]
 
-                    dropout = self.vera_dropout[active_adapter]
+                    dropout = self.uora_dropout[active_adapter]
 
                     requires_conversion = not torch.is_autocast_enabled()
                     if requires_conversion:
@@ -219,8 +223,8 @@ if is_bnb_available():
                         if x.dtype != compute_dtype:
                             x = x.to(compute_dtype)
 
-                    sliced_A = vera_A[:, : self.in_features].to(x.device)
-                    sliced_B = vera_B[: self.out_features, :].to(x.device)
+                    sliced_A = uora_A[:, : self.in_features].to(x.device)
+                    sliced_B = uora_B[: self.out_features, :].to(x.device)
 
                     x_temp = dropout(x.to(lambda_d.dtype))
 
@@ -233,43 +237,51 @@ if is_bnb_available():
 
                     result = result + adapter_output
 
+                    # Run UORA logic during training
+                    if self.training and hasattr(self, 'lambda_d_counter'):
+                        self.run_uora(active_adapter, lambda_d)
+
             # Ensure the output tensor has the same dtype as the input tensor
             return result.to(x.dtype)
 
         def __repr__(self) -> str:
             rep = super().__repr__()
-            return "vera." + rep
+            return "uora." + rep
 
 
 if is_bnb_4bit_available():
 
-    class Linear4bit(torch.nn.Module, VeraLayer):
+    class Linear4bit(torch.nn.Module, UoraLayer):
         def __init__(
             self,
             base_layer: torch.nn.Module,
             adapter_name: str,
-            vera_A,
-            vera_B,
+            uora_A,
+            uora_B,
             r: int = 0,
-            vera_dropout: float = 0.0,
+            uora_dropout: float = 0.0,
             fan_in_fan_out: bool = False,
             init_weights: bool = True,
             d_initial: float = 0.1,
             **kwargs,
         ) -> None:
             super().__init__()
-            VeraLayer.__init__(self, base_layer)
+            UoraLayer.__init__(self, base_layer, **kwargs)
             self.fan_in_fan_out = fan_in_fan_out
 
             self._active_adapter = adapter_name
             self.update_layer(
                 adapter_name,
-                vera_A,
-                vera_B,
+                uora_A,
+                uora_B,
                 r,
-                vera_dropout=vera_dropout,
+                uora_dropout=uora_dropout,
                 init_weights=init_weights,
                 d_initial=d_initial,
+                alpha=kwargs.get("alpha", 0.5),
+                tau=kwargs.get("tau", 1e-5),
+                count_k=kwargs.get("count_k", 1),
+                gradient_accumulation_steps=kwargs.get("gradient_accumulation_steps", 1),
             )
 
         def merge(self, safe_merge: bool = False, adapter_names: Optional[list[str]] = None) -> None:
@@ -284,19 +296,19 @@ if is_bnb_4bit_available():
                 return
 
             for active_adapter in adapter_names:
-                if active_adapter not in self.vera_lambda_d.keys():
+                if active_adapter not in self.uora_lambda_d.keys():
                     continue
 
                 warnings.warn(
-                    "Merge vera module to 4-bit linear may get different generations due to rounding errors."
+                    "Merge UORA module to 4-bit linear may get different generations due to rounding errors."
                 )
-                vera_data = self.get_delta_weight(active_adapter)
+                uora_data = self.get_delta_weight(active_adapter)
 
                 weight = self.get_base_layer().weight
                 kwargs = weight.__dict__
                 # torch.compile can introduce attributes preceded by '_', remove them
                 kwargs = {k: v for k, v in kwargs.items() if not k.startswith("_")}
-                w_data = bnb.functional.dequantize_4bit(weight.data, weight.quant_state) + vera_data
+                w_data = bnb.functional.dequantize_4bit(weight.data, weight.quant_state) + uora_data
 
                 if safe_merge and not torch.isfinite(w_data).all():
                     raise ValueError(
@@ -315,41 +327,41 @@ if is_bnb_4bit_available():
 
             while len(self.merged_adapters) > 0:
                 active_adapter = self.merged_adapters.pop()
-                if active_adapter not in self.vera_lambda_d.keys():
+                if active_adapter not in self.uora_lambda_d.keys():
                     continue
                 warnings.warn(
-                    "Unmerge vera module to 4-bit linear may get different generations due to rounding errors."
+                    "Unmerge UORA module to 4-bit linear may get different generations due to rounding errors."
                 )
-                vera_data = self.get_delta_weight(active_adapter)
+                uora_data = self.get_delta_weight(active_adapter)
 
                 weight = self.get_base_layer().weight
                 kwargs = weight.__dict__
-                w_data = bnb.functional.dequantize_4bit(weight.data, weight.quant_state) - vera_data
+                w_data = bnb.functional.dequantize_4bit(weight.data, weight.quant_state) - uora_data
 
                 self.get_base_layer().weight = bnb.nn.Params4bit(w_data.to("cpu"), requires_grad=False, **kwargs).to(
                     weight.device
                 )
 
         def get_delta_weight(self, adapter) -> torch.Tensor:
-            vera_A = self.vera_A[adapter]
-            vera_B = self.vera_B[adapter]
+            uora_A = self.uora_A[adapter]
+            uora_B = self.uora_B[adapter]
 
-            device = vera_B.device
-            dtype = vera_B.dtype
+            device = uora_B.device
+            dtype = uora_B.dtype
 
             cast_to_fp32 = device.type == "cpu" and (dtype == torch.float16 or dtype == torch.bfloat16)
 
-            lambda_d = self.vera_lambda_d[adapter]
-            lambda_b = self.vera_lambda_b[adapter]
+            lambda_d = self.uora_lambda_d[adapter]
+            lambda_b = self.uora_lambda_b[adapter]
 
             if cast_to_fp32:
-                vera_A = vera_A.float()
-                vera_B = vera_B.float()
+                uora_A = uora_A.float()
+                uora_B = uora_B.float()
                 lambda_d = lambda_d.float()
                 lambda_b = lambda_b.float()
 
-            sliced_A = vera_A[:, : self.in_features].to(lambda_d.device)
-            sliced_B = vera_B[: self.out_features, :].to(lambda_d.device)
+            sliced_A = uora_A[:, : self.in_features].to(lambda_d.device)
+            sliced_B = uora_B[: self.out_features, :].to(lambda_d.device)
             lambda_b = lambda_b.unsqueeze(-1)
             lambda_d = lambda_d.unsqueeze(-1)
 
@@ -371,16 +383,16 @@ if is_bnb_4bit_available():
                 result = self.base_layer(x, *args, **kwargs)
                 result = result.clone()
                 for active_adapter in self.active_adapters:
-                    if active_adapter not in self.vera_lambda_d.keys():
+                    if active_adapter not in self.uora_lambda_d.keys():
                         continue
 
-                    lambda_d = self.vera_lambda_d[active_adapter]
-                    lambda_b = self.vera_lambda_b[active_adapter]
+                    lambda_d = self.uora_lambda_d[active_adapter]
+                    lambda_b = self.uora_lambda_b[active_adapter]
 
-                    vera_A = self.vera_A[active_adapter]
-                    vera_B = self.vera_B[active_adapter]
+                    uora_A = self.uora_A[active_adapter]
+                    uora_B = self.uora_B[active_adapter]
 
-                    dropout = self.vera_dropout[active_adapter]
+                    dropout = self.uora_dropout[active_adapter]
 
                     requires_conversion = not torch.is_autocast_enabled()
                     if requires_conversion:
@@ -389,8 +401,8 @@ if is_bnb_4bit_available():
                         if x.dtype != compute_dtype:
                             x = x.to(compute_dtype)
 
-                    sliced_A = vera_A[:, : self.in_features].to(x.device)
-                    sliced_B = vera_B[: self.out_features, :].to(x.device)
+                    sliced_A = uora_A[:, : self.in_features].to(x.device)
+                    sliced_B = uora_B[: self.out_features, :].to(x.device)
 
                     x_temp = dropout(x.to(lambda_d.dtype))
 
@@ -403,9 +415,13 @@ if is_bnb_4bit_available():
 
                     result = result + adapter_output
 
+                    # Run UORA logic during training
+                    if self.training and hasattr(self, 'lambda_d_counter'):
+                        self.run_uora(active_adapter, lambda_d)
+
             # Ensure the output tensor has the same dtype as the input tensor
             return result.to(x.dtype)
 
         def __repr__(self) -> str:
             rep = super().__repr__()
-            return "vera." + rep
+            return "uora." + rep

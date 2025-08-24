@@ -132,12 +132,20 @@ class TestUora:
             d_initial=0.2,
             uora_dropout=0.1,
             save_projection=False,
+            alpha=0.7,
+            tau=1e-6,
+            count_k=3,
+            gradient_accumulation_steps=8,
         )
         
         assert config.r == 16
         assert config.d_initial == 0.2
         assert config.uora_dropout == 0.1
         assert config.save_projection is False
+        assert config.alpha == 0.7
+        assert config.tau == 1e-6
+        assert config.count_k == 3
+        assert config.gradient_accumulation_steps == 8
         assert config.peft_type.name == "UORA"
 
     def test_state_dict_keys(self, mlp):
@@ -161,3 +169,77 @@ class TestUora:
         # Test that the repr contains uora
         lin1_repr = repr(peft_model.base_model.model.lin1)
         assert "uora" in lin1_repr.lower()
+
+    def test_uora_specific_initialization(self, mlp):
+        """Test that UORA uses orthogonal initialization (different from VeRA)."""
+        config = UoraConfig(target_modules=["lin1", "lin2"], r=16, projection_prng_key=42)
+        peft_model = get_peft_model(mlp, config)
+        
+        # Check that UORA matrices exist and have correct shape
+        lin1_layer = peft_model.base_model.model.lin1
+        assert hasattr(lin1_layer, 'uora_A')
+        assert hasattr(lin1_layer, 'uora_B')
+        
+        uora_A = lin1_layer.uora_A["default"]
+        uora_B = lin1_layer.uora_B["default"]
+        
+        # Check shapes
+        assert uora_A.shape[0] == config.r
+        assert uora_B.shape[1] == config.r
+        
+        # For orthogonal matrices, check that they're approximately orthogonal
+        # (This is a basic sanity check - exact orthogonality might not hold for rectangular matrices)
+        if uora_A.shape[0] <= uora_A.shape[1]:
+            product = uora_A @ uora_A.T
+            identity = torch.eye(uora_A.shape[0])
+            max_diff = torch.abs(product - identity).max().item()
+            assert max_diff < 1e-3, f"Matrix A not approximately orthogonal, max diff: {max_diff}"
+
+    def test_uora_state_tracking(self, mlp):
+        """Test that UORA state tracking variables are initialized."""
+        config = UoraConfig(
+            target_modules=["lin1"], 
+            r=8,
+            alpha=0.6,
+            tau=1e-5,
+            count_k=2,
+            gradient_accumulation_steps=4
+        )
+        peft_model = get_peft_model(mlp, config)
+        
+        lin1_layer = peft_model.base_model.model.lin1
+        
+        # Check that UORA state tracking variables are present
+        assert hasattr(lin1_layer, 'lambda_d_counter')
+        assert hasattr(lin1_layer, 'gradient_step')
+        assert hasattr(lin1_layer, 'alpha')
+        assert hasattr(lin1_layer, 'tau')
+        assert hasattr(lin1_layer, 'count_k')
+        assert hasattr(lin1_layer, 'gradient_accumulation_steps')
+        
+        # Check initial values
+        assert lin1_layer.lambda_d_counter.shape == (config.r,)
+        assert lin1_layer.gradient_step == 0
+        assert lin1_layer.alpha == config.alpha
+        assert lin1_layer.tau == config.tau
+        assert lin1_layer.count_k == config.count_k
+        assert lin1_layer.gradient_accumulation_steps == config.gradient_accumulation_steps
+
+    def test_uora_methods_exist(self, mlp):
+        """Test that UORA-specific methods are available."""
+        config = UoraConfig(target_modules=["lin1"], alpha=0.5, tau=1e-5, count_k=1)
+        peft_model = get_peft_model(mlp, config)
+        
+        lin1_layer = peft_model.base_model.model.lin1
+        
+        # Check that UORA methods exist
+        assert hasattr(lin1_layer, 'get_dynamic_alpha')
+        assert hasattr(lin1_layer, 'update_tau')
+        assert hasattr(lin1_layer, 'reinit_uora_matrix_at_index')
+        assert hasattr(lin1_layer, 'run_uora')
+        
+        # Test that methods are callable
+        assert callable(lin1_layer.get_dynamic_alpha)
+        assert callable(lin1_layer.update_tau)
+        assert callable(lin1_layer.reinit_uora_matrix_at_index)
+        assert callable(lin1_layer.run_uora)

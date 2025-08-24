@@ -142,6 +142,22 @@ class UoraConfig(PeftConfig):
             )
         },
     )
+    alpha: float = field(
+        default=0.5,
+        metadata={"help": "Interpolation factor for UORA matrix reinitialization. Default is 0.5."},
+    )
+    tau: float = field(
+        default=1e-5,
+        metadata={"help": "Threshold value for UORA reinitialization trigger. Default is 1e-5."},
+    )
+    count_k: int = field(
+        default=1,
+        metadata={"help": "Reinitialization frequency counter for UORA. Default is 1."},
+    )
+    gradient_accumulation_steps: int = field(
+        default=1,
+        metadata={"help": "Number of gradient accumulation steps for UORA logic. Default is 1."},
+    )
 
     def __post_init__(self):
         super().__post_init__()

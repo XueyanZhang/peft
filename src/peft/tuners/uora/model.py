@@ -69,6 +69,35 @@ def _kaiming_init(
         return tensor.uniform_(-bound, bound, generator=generator)
 
 
+def _orthogonal_init(
+    tensor_or_shape: Union[torch.Tensor, tuple[int, ...]],
+    generator: torch.Generator,
+) -> torch.Tensor:
+    """
+    Orthogonal Initialisation adapted to accept a `torch.Generator` object for PRNG.
+
+    Args:
+        tensor_or_shape (`Union[torch.Tensor, tuple[int, ...]]`):
+            Tensor to initialise, or shape of new tensor to create and then initialise.
+        generator: (`torch.Generator`):
+            Generator object that manages the state of the PRNG algorithm in use.
+
+    Returns:
+        `torch.Tensor`: The initialised tensor.
+    """
+    if isinstance(tensor_or_shape, tuple):
+        tensor = torch.empty(tensor_or_shape)
+    else:
+        tensor = tensor_or_shape
+
+    with torch.no_grad():
+        random_mat = torch.randn(tensor.shape, generator=generator)
+        u, _, v = torch.svd(random_mat)
+        q = u if u.shape == tensor.shape else v.t()
+        q = q.reshape(tensor.shape)
+        return tensor.copy_(q)
+
+
 class UoraModel(BaseTuner):
     """
     Creates UORA model from a pretrained transformers model.
@@ -147,8 +176,10 @@ class UoraModel(BaseTuner):
 
         # deterministic init of uora_A and uora_B if we know the key
         generator = torch.Generator(device="cpu").manual_seed(config.projection_prng_key)
-        uora_A = _kaiming_init((config.r, linear_in_dim), generator=generator)
-        uora_B = _kaiming_init((linear_out_dim, config.r), generator=generator)
+        
+        # Use orthogonal initialization for UORA (different from VeRA's kaiming init)
+        uora_A = _orthogonal_init((config.r, linear_in_dim), generator=generator)
+        uora_B = _orthogonal_init((linear_out_dim, config.r), generator=generator)
 
         self.uora_A[adapter_name] = uora_A
         self.uora_B[adapter_name] = uora_B
@@ -216,6 +247,10 @@ class UoraModel(BaseTuner):
             "init_weights": uora_config.init_weights,
             "loaded_in_8bit": getattr(self.model, "is_loaded_in_8bit", False),
             "loaded_in_4bit": getattr(self.model, "is_loaded_in_4bit", False),
+            "alpha": uora_config.alpha,
+            "tau": uora_config.tau,
+            "count_k": uora_config.count_k,
+            "gradient_accumulation_steps": uora_config.gradient_accumulation_steps,
         }
         kwargs["bias"] = bias
 
@@ -228,6 +263,10 @@ class UoraModel(BaseTuner):
                 uora_config.uora_dropout,
                 uora_config.init_weights,
                 d_initial=uora_config.d_initial,
+                alpha=uora_config.alpha,
+                tau=uora_config.tau,
+                count_k=uora_config.count_k,
+                gradient_accumulation_steps=uora_config.gradient_accumulation_steps,
             )
         else:
             new_module = self._create_new_module(uora_config, self.uora_A, self.uora_B, adapter_name, target, **kwargs)
